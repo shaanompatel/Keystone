@@ -1,0 +1,12 @@
+numpy
+scipy
+librosa
+matplotlib
+scikit-learn
+torch
+streamlit
+pandas
+seaborn
+omegaconf
+soundfile
+yt-dlp
