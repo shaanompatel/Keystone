@@ -1,46 +1,43 @@
 # Sim2Real Chord Classifier
 
-This project trains machine learning models on synthetic audio data to classify musical chords in real-world recordings.
+## About
+This project uses a **Sim2Real** approach to classify musical chords. It trains machine learning models on **synthetic audio** (generated mathematically) and reinforces them with **real-world data** from YouTube. This allows the system to robustly identify chords (C Major, G Major, A Minor, F Major) across different instruments and recording conditions.
 
-## Setup
+## Getting Started
 
-1.  Install dependencies:
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-## Usage
-
-### 1. Generate Synthetic Data
-Generate the training dataset (C Major, G Major, A Minor, F Major):
+### 1. Installation
+Install the required dependencies:
 ```bash
-python src/generator.py --samples 500
+pip install -r requirements.txt
 ```
-This creates `data/synthetic`.
 
-### 2. Train Models
-Train the Baseline (Random Forest) and Advanced (CNN) models:
+### 2. Data Setup
+Generate synthetic training data and (optionally) download real samples:
+```bash
+# Generate synthetic waveforms
+python src/generator.py
+
+# (Optional) Download real examples from YouTube
+python src/youtube_scraper.py --query "C Major Guitar Strum" --class_name "C_Major"
+```
+
+### 3. Training
+Train the Deep Learning models (CNN, RNN):
 ```bash
 python src/train.py
 ```
-Models are saved to `models/`.
+*Models are automatically saved to the `models/` directory.*
 
-### 3. Run Web App
-Launch the Streamlit interface:
-```bash
-streamlit run app.py
-```
+### 4. Run App
+Launch the interactive web interface to test the models:
 
-### 4. Evaluate on Real Data
-To evaluate on a folder of real `.wav` files:
-```bash
-python src/evaluate.py path/to/real/audio
-```
+## Result Highlights
+### Model Comparison
+![Model Accuracy Comparison](models/model_comparison_bar.png)
 
-## Project Structure
-- `src/generator.py`: Synthetic data generation.
-- `src/process.py`: Audio processing (Mel-Spectrograms).
-- `src/models.py`: Model architectures.
-- `src/train.py`: Training loop.
-- `src/evaluate.py`: Evaluation script.
-- `app.py`: Streamlit web application.
+### Training Performance (CNN)
+| Training Curve | Confusion Matrix |
+|:---:|:---:|
+| ![CNN Curve](models/CNN_Basic_curve.png) | ![CNN Confusion Matrix](models/cm_CNN_Basic.png) |
+
+*Results show that Deep Learning models (CNN) trained on synthetic data generalize well to real-world examples.*

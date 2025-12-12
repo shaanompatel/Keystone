@@ -10,3 +10,5 @@ seaborn
 omegaconf
 soundfile
 yt-dlp
+pydub
+tqdm

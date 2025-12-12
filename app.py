@@ -5,8 +5,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import os
 import joblib
-from src.process import audio_to_melspectrogram, preprocess_dataset
-from src.models import BaselineModel, AdvancedModel, BaselineModel # Import both
+from src.process import audio_to_melspectrogram
+from src.models import BaselineModel, AdvancedModel, RNNModel, GradientBoostingWrapper
 import librosa
 import soundfile as sf
 import tempfile
@@ -27,23 +27,49 @@ def load_classes():
         return ["A_Minor", "C_Major", "F_Major", "G_Major"] # Fallback
 
 @st.cache_resource
-def load_baseline():
-    path = os.path.join(MODELS_DIR, "baseline.pkl")
-    if os.path.exists(path):
-        model = BaselineModel()
-        model.load(path)
-        return model
-    return None
+def load_model(model_name, num_classes):
+    path = ""
+    model = None
+    
+    try:
+        if model_name == "Random Forest (Baseline)":
+            path = os.path.join(MODELS_DIR, "baseline_rf.pkl")
+            if os.path.exists(path):
+                model = BaselineModel()
+                model.load(path)
+                
+        elif model_name == "Gradient Boosting":
+            path = os.path.join(MODELS_DIR, "gbm.pkl")
+            if os.path.exists(path):
+                model = GradientBoostingWrapper()
+                model.load(path)
+                
+        elif model_name == "CNN Basic":
+            path = os.path.join(MODELS_DIR, "CNN_Basic_best.pth")
+            if os.path.exists(path):
+                model = AdvancedModel(num_classes=num_classes)
+                model.load_state_dict(torch.load(path, map_location=torch.device('cpu')))
+                model.eval()
 
-@st.cache_resource
-def load_advanced(num_classes):
-    path = os.path.join(MODELS_DIR, "advanced.pth")
-    if os.path.exists(path):
-        model = AdvancedModel(num_classes=num_classes)
-        model.load_state_dict(torch.load(path, map_location=torch.device('cpu')))
-        model.eval()
-        return model
-    return None
+        elif model_name == "CNN Augmented":
+            path = os.path.join(MODELS_DIR, "CNN_Augmented_best.pth")
+            if os.path.exists(path):
+                model = AdvancedModel(num_classes=num_classes)
+                model.load_state_dict(torch.load(path, map_location=torch.device('cpu')))
+                model.eval()
+                
+        elif model_name == "RNN Mel":
+            path = os.path.join(MODELS_DIR, "RNN_Mel_best.pth")
+            if os.path.exists(path):
+                model = RNNModel(num_classes=num_classes, input_size=128)
+                model.load_state_dict(torch.load(path, map_location=torch.device('cpu')))
+                model.eval()
+                
+    except Exception as e:
+        print(f"Error loading {model_name}: {e}")
+        return None
+        
+    return model
 
 def main():
     st.title("🎸 Sim2Real Chord Classifier")
@@ -53,17 +79,21 @@ def main():
     
     # Sidebar
     st.sidebar.header("Model Configuration")
-    model_choice = st.sidebar.selectbox("Select Model", ["Baseline (Random Forest)", "Advanced (CNN)"])
+    model_options = [
+        "CNN Augmented",
+        "CNN Basic",
+        "RNN Mel",
+        "Random Forest (Baseline)",
+        "Gradient Boosting"
+    ]
+    model_choice = st.sidebar.selectbox("Select Model", model_options)
     
     # Load Models
-    if model_choice == "Baseline (Random Forest)":
-        model = load_baseline()
-    else:
-        model = load_advanced(len(classes))
+    model = load_model(model_choice, len(classes))
         
     if model is None:
-        st.error(f"Model {model_choice} not found. Please run training script first.")
-        st.info("Run `python src/train.py` in the terminal.")
+        st.error(f"Model '{model_choice}' not found or failed to load.")
+        st.info("Ensure you have run `python src/train.py` (for DL) and `python src/train_ml.py` (for ML).")
         return
 
     # Input Section
@@ -115,11 +145,23 @@ def main():
             # Prepare input
             X = np.array([spec])
             
-            if "Baseline" in model_choice:
-                probs = model.predict_proba(X)[0]
-                pred_idx = np.argmax(probs)
+            is_ml_model = model_choice in ["Random Forest (Baseline)", "Gradient Boosting"]
+            
+            if is_ml_model:
+                try:
+                    probs = model.predict_proba(X)[0]
+                    pred_idx = np.argmax(probs)
+                except Exception as e:
+                    st.error(f"Prediction failed: {e}")
+                    return
             else:
+                # DL models
                 X_tensor = torch.tensor(X, dtype=torch.float32).unsqueeze(1)
+                
+                # RNN expects (batch, time, freq) or handles it? `RNNModel` logic in src/models.py:
+                # forward(x): if dim==4 -> squeeze(1) -> permute. 
+                # So passing (1, 1, 128, 87) is handled correctly by current RNNModel code.
+                
                 with torch.no_grad():
                     outputs = model(X_tensor)
                     probs = torch.nn.functional.softmax(outputs, dim=1)[0].numpy()
