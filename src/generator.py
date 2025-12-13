@@ -7,18 +7,13 @@ from scipy import signal
 
 # Constants
 SAMPLE_RATE = 22050
-DURATION = 2.0  # Seconds
+DURATION = 2.0 # seconds
 AMPLITUDE = 0.5
 
-# Note Frequencies (A4 = 440Hz)
-# C Major: C (261.63), E (329.63), G (392.00)
-# G Major: G (392.00), B (493.88), D (587.33)
-# A Minor: A (440.00), C (523.25), E (659.25)
-# F Major: F (349.23), A (440.00), C (523.25)
-
+# note frequencies
 CHORD_FREQS = {
     'C_Major': [261.63, 329.63, 392.00],
-    'G_Major': [196.00, 246.94, 293.66], # Lower G for better separation from C's G
+    'G_Major': [196.00, 246.94, 293.66],
     'A_Minor': [220.00, 261.63, 329.63],
     'F_Major': [174.61, 220.00, 261.63]
 }
@@ -44,11 +39,9 @@ def apply_envelope(wave, sample_rate, attack=0.1, release=0.5):
     
     envelope = np.ones(n_samples)
     
-    # Attack linear ramp
     if attack_samples > 0:
         envelope[:attack_samples] = np.linspace(0, 1, attack_samples)
         
-    # Release linear ramp
     if release_samples > 0:
         envelope[-release_samples:] = np.linspace(1, 0, release_samples)
         
@@ -62,12 +55,12 @@ def construct_chord(chord_name, duration, sample_rate, wave_type='sine'):
     mixed_wave = np.zeros(int(sample_rate * duration))
     
     for f in freqs:
-        # Slight detuning for realism
+        #add randomness, detuning is done for realism
         detune = random.uniform(-0.5, 0.5)
         tone = generate_tone(f + detune, duration, sample_rate, wave_type)
         mixed_wave += tone
         
-    # Normalize
+    # normalize
     mixed_wave = mixed_wave / len(freqs)
     
     return apply_envelope(mixed_wave, sample_rate)
@@ -77,7 +70,7 @@ def add_noise(wave, noise_level=0.01):
     return wave + noise
 
 def add_harmonics(wave, freq, sample_rate):
-    # Simple addition of 2nd harmonic
+    # add another harmonic
     t = np.linspace(0, len(wave)/sample_rate, len(wave), endpoint=False)
     harmonic = 0.3 * np.sin(2 * np.pi * (freq * 2) * t)
     return wave + harmonic
@@ -98,20 +91,17 @@ def generate_dataset(output_dir, n_samples_per_chord=100):
         print(f"Generating {chord_name}...")
         
         for i in range(n_samples_per_chord):
-            # Randomize parameters
             wave_type = random.choice(wave_types)
             is_noisy = random.random() > 0.5
             
-            # Generate base chord
             audio = construct_chord(chord_name, DURATION, SAMPLE_RATE, wave_type)
             
-            # Augmentations
+            # add augmentations
             if is_noisy:
                 audio = add_noise(audio, noise_level=random.uniform(0.005, 0.05))
-                # Occasionally drop amplitude to simulate distance
                 audio = audio * random.uniform(0.5, 1.0)
             
-            # Save
+            # save generated wav
             filename = f"{chord_name}_{i}_{wave_type}_{'noisy' if is_noisy else 'clean'}.wav"
             filepath = os.path.join(chord_dir, filename)
             sf.write(filepath, audio, SAMPLE_RATE)

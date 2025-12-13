@@ -1,34 +1,90 @@
-import os
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset
-from sklearn.model_selection import train_test_split
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from sklearn.model_selection import train_test_split, GroupShuffleSplit
 from sklearn.metrics import classification_report, confusion_matrix
+
+import os
+os.environ["MPLBACKEND"] = "Agg"
+
+import matplotlib
+matplotlib.use("Agg")
+
 import seaborn as sns
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+import json
 
-# Import from our modules
 from process import preprocess_dataset_lazy, load_and_process, extract_features, spec_augment, AudioAugmenter
 from models import BaselineModel, AdvancedModel, RNNModel, GradientBoostingWrapper
 from utils import get_cache_path
 
-# Config
 DATA_DIRS = ["data/real_train", "data/synthetic", "data/downloads"]
 MODELS_DIR = "models"
 BATCH_SIZE = 32
 EPOCHS = 50
 LEARNING_RATE = 0.001
 
+def make_weighted_sampler(labels, num_classes):
+    counts = np.bincount(labels, minlength=num_classes)
+    counts = np.maximum(counts, 1)
+    class_weights = 1.0 / counts
+    sample_weights = class_weights[np.array(labels)]
+    sample_weights = torch.tensor(sample_weights, dtype=torch.double)
+    return WeightedRandomSampler(sample_weights, num_samples=len(sample_weights), replacement=True)
+
+def parse_video_id(path: str):
+    
+    base = os.path.basename(path)
+    parts = base.split("__")
+    if len(parts) >= 3:
+        return parts[1]
+    return base # fallback
+
+def make_group_split(file_paths, labels, test_size=0.2, seed=42):
+    groups = [parse_video_id(p) for p in file_paths]
+    gss = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=seed)
+    train_idx, test_idx = next(gss.split(file_paths, labels, groups=groups))
+    X_train = [file_paths[i] for i in train_idx]
+    y_train = [labels[i] for i in train_idx]
+    X_test = [file_paths[i] for i in test_idx]
+    y_test = [labels[i] for i in test_idx]
+    return X_train, X_test, y_train, y_test
+
+def mixup_batch(x, y, alpha=0.4):
+    
+    if alpha <= 0:
+        return x, y, y, 1.0
+    lam = np.random.beta(alpha, alpha)
+    idx = torch.randperm(x.size(0), device=x.device)
+    mixed = lam * x + (1 - lam) * x[idx]
+    return mixed, y, y[idx], lam
+
+class SoftTargetCrossEntropy(nn.Module):
+    def __init__(self, label_smoothing=0.0):
+        super().__init__()
+        self.label_smoothing = float(label_smoothing)
+
+    def forward(self, logits, target):
+        # target int64 class label
+        num_classes = logits.size(-1)
+        with torch.no_grad():
+            true_dist = torch.zeros_like(logits)
+            true_dist.fill_(self.label_smoothing / (num_classes - 1))
+            true_dist.scatter_(1, target.unsqueeze(1), 1.0 - self.label_smoothing)
+        logp = torch.log_softmax(logits, dim=-1)
+        return -(true_dist * logp).sum(dim=-1).mean()
+
 class AudioDataset(Dataset):
-    def __init__(self, file_paths, labels, feature_type='melspec', augment=False, cache=True):
+    def __init__(self, file_paths, labels, feature_type='melspec', augment=False, cache=True, norm_stats=None):
         self.file_paths = file_paths
         self.labels = labels
         self.feature_type = feature_type
         self.augment = augment
         self.cache = cache
+        self.norm_stats = norm_stats
         
     def __len__(self):
         return len(self.file_paths)
@@ -68,79 +124,101 @@ class AudioDataset(Dataset):
         if self.augment and self.feature_type == 'melspec':
             features = spec_augment(features)
         
+        if features is not None and self.norm_stats is not None:
+            from process import apply_norm
+            features = apply_norm(features, self.norm_stats)
+        
         features_t = torch.tensor(features, dtype=torch.float32)
         return features_t, torch.tensor(label, dtype=torch.long)
 
-def train_dl_model(model_name, model, train_loader, test_loader, device, epochs=EPOCHS):
-    print(f"\n--- Training {model_name} for {epochs} epochs ---")
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5)
-    
+def train_dl_model(model_name, model, train_loader, test_loader, device, epochs=EPOCHS, use_mixup=False, mixup_alpha=0.4):
+    print(f"\nTraining {model_name} for {epochs} epochs")
+
+    criterion = SoftTargetCrossEntropy(label_smoothing=0.05)
+    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
+
+    steps_per_epoch = max(1, len(train_loader))
+    scheduler = optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=LEARNING_RATE,
+        epochs=epochs,
+        steps_per_epoch=steps_per_epoch,
+        pct_start=0.1
+    )
+
+    early_patience = 10
+    best_epoch = -1
+    best_acc = 0.0
+
     train_losses = []
     val_accuracies = []
-    best_acc = 0.0
-    
-    # Outer loop for epochs (optional to tqdm this, but let's do inner loops for detail)
+
     for epoch in range(epochs):
         model.train()
         running_loss = 0.0
-        
-        # Training Loop
+
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]", unit="batch")
         for inputs, labels in pbar:
             inputs, labels = inputs.to(device), labels.to(device)
-            if model_name.startswith("CNN"):
-                if inputs.dim() == 3:
-                     inputs = inputs.unsqueeze(1)
-            
+
+            if model_name.startswith("CNN") and inputs.dim() == 3:
+                inputs = inputs.unsqueeze(1)
+
             optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
+
+            if use_mixup:
+                mixed, y_a, y_b, lam = mixup_batch(inputs, labels, alpha=mixup_alpha)
+                outputs = model(mixed)
+                loss = lam * criterion(outputs, y_a) + (1 - lam) * criterion(outputs, y_b)
+            else:
+                outputs = model(inputs)
+                loss = criterion(outputs, labels)
+
             loss.backward()
             optimizer.step()
+            scheduler.step()
+
             running_loss += loss.item()
-            
             pbar.set_postfix({'loss': f"{loss.item():.4f}"})
-            
-        epoch_loss = running_loss / len(train_loader)
+
+        epoch_loss = running_loss / max(1, len(train_loader))
         train_losses.append(epoch_loss)
-        
-        # Validation Loop
+
+        # validation
         model.eval()
         correct = 0
         total = 0
         all_preds = []
         all_labels = []
-        
-        # We don't necessarily need tqdm for validation if it's fast, but consistent UI is nice
+
         with torch.no_grad():
-            for inputs, labels in tqdm(test_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]  ", unit="batch", leave=False):
+            for inputs, labels in tqdm(test_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]", unit="batch", leave=False):
                 inputs, labels = inputs.to(device), labels.to(device)
-                if model_name.startswith("CNN"):
-                    if inputs.dim() == 3:
-                        inputs = inputs.unsqueeze(1)
-                        
+                if model_name.startswith("CNN") and inputs.dim() == 3:
+                    inputs = inputs.unsqueeze(1)
+
                 outputs = model(inputs)
-                _, predicted = torch.max(outputs.data, 1)
+                _, predicted = torch.max(outputs, 1)
+
                 total += labels.size(0)
                 correct += (predicted == labels).sum().item()
-                
                 all_preds.extend(predicted.cpu().numpy())
                 all_labels.extend(labels.cpu().numpy())
-                
-        val_acc = correct / total
+
+        val_acc = correct / max(1, total)
         val_accuracies.append(val_acc)
-        
+
         if val_acc > best_acc:
             best_acc = val_acc
+            best_epoch = epoch
             torch.save(model.state_dict(), os.path.join(MODELS_DIR, f"{model_name}_best.pth"))
-        
-        scheduler.step(epoch_loss)
-        
-        # Print summary for the epoch
+
+        if (epoch - best_epoch) >= early_patience:
+            tqdm.write(f"Early stopping at epoch {epoch+1} (best epoch {best_epoch+1})")
+            break
+
         tqdm.write(f"Epoch {epoch+1}: Loss={epoch_loss:.4f}, Val Acc={val_acc:.4f} (Best: {best_acc:.4f})")
-        
+
     print(f"Finished {model_name}. Best Val Acc: {best_acc:.4f}")
     return train_losses, val_accuracies, best_acc, all_preds, all_labels
 
@@ -158,8 +236,27 @@ def main():
         for c in classes:
             f.write(c + "\n")
             
-    X_train_paths, X_test_paths, y_train, y_test = train_test_split(file_paths, labels, test_size=0.2, random_state=42)
+    X_train_paths, X_test_paths, y_train, y_test = make_group_split(file_paths, labels, test_size=0.2, seed=42)
     
+    # get norm stats
+    from process import compute_dataset_norm
+
+    tmp_feats = []
+    for p in X_train_paths[:min(400, len(X_train_paths))]:
+        y_raw, sr_raw = load_and_process(p)
+        if y_raw is None:
+            continue
+        f = extract_features(y_raw, sr_raw, 'melspec')
+        if f is not None:
+            tmp_feats.append(f)
+
+    norm_stats = compute_dataset_norm(tmp_feats)
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    with open(os.path.join(MODELS_DIR, "norm_stats.json"), "w") as f:
+        json.dump(norm_stats, f)
+    print("Saved norm stats:", norm_stats)
+
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
@@ -199,13 +296,25 @@ def main():
         feature = exp["feature"]
         epochs = exp.get("epochs", EPOCHS)
         
-        train_ds = AudioDataset(X_train_paths, y_train, feature_type=feature, augment=augment, cache=True)
-        test_ds = AudioDataset(X_test_paths, y_test, feature_type=feature, augment=False, cache=True)
+        train_ds = AudioDataset(X_train_paths, y_train, feature_type=feature, augment=augment, cache=True, norm_stats=norm_stats)
+        test_ds = AudioDataset(X_test_paths, y_test, feature_type=feature, augment=False, cache=True, norm_stats=norm_stats)
         
-        # Optimized DataLoader
-        train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True, persistent_workers=True)
-        test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
-        
+        # sampling with balancing varying class sizes
+        class_counts = np.bincount(np.array(y_train), minlength=len(classes))
+        class_weights = 1.0 / np.maximum(class_counts, 1)
+        sample_weights = [class_weights[y] for y in y_train]
+        sampler = make_weighted_sampler(y_train, num_classes=len(classes))
+        train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler)
+
+        test_loader = DataLoader(
+            test_ds,
+            batch_size=BATCH_SIZE,
+            shuffle=False,
+            num_workers=4,
+            pin_memory=True,
+            persistent_workers=True
+        )
+
         model = exp["model_cls"](**exp["args"]).to(device)
         
         losses, val_accs, best, preds, true_labels = train_dl_model(name, model, train_loader, test_loader, device, epochs=epochs)
@@ -222,7 +331,6 @@ def main():
     print("\n--- Training ML Models ---")
     print("Extracting features for ML models (using memmap for memory efficiency)...")
     
-    # We need to determine the shape of features first
     sample_shape = None
     for p in X_train_paths:
         y_dummy, sr_dummy = load_and_process(p)
@@ -238,18 +346,15 @@ def main():
 
     print(f"Feature shape: {sample_shape}")
     
-    # Create memmaps
+    # create memmaps
     import tempfile
     
-    # Use a temp directory
     temp_dir = tempfile.mkdtemp()
     print(f"Using temp dir for memmaps: {temp_dir}")
     
     train_memmap_path = os.path.join(temp_dir, "X_train.dat")
     test_memmap_path = os.path.join(temp_dir, "X_test.dat")
     
-    # Pre-allocate memmaps
-    # Shape: (N_samples, *sample_shape)
     num_train = len(X_train_paths)
     num_test = len(X_test_paths)
     
@@ -259,7 +364,7 @@ def main():
     X_test_ml = np.memmap(test_memmap_path, dtype='float32', mode='w+', shape=(num_test,) + sample_shape)
     y_test_ml = []
 
-    # Fill Train
+    # train
     valid_train_indices = []
     print("Processing Training Data...")
     for idx, (p, l) in enumerate(tqdm(zip(X_train_paths, y_train), total=num_train, desc="Train Feats")):
@@ -267,7 +372,7 @@ def main():
         if y is not None:
             f = extract_features(y, sr, 'melspec')
             if f is not None:
-                # Check shape consistency
+
                 if f.shape == sample_shape:
                     X_train_ml[idx] = f
                     y_train_ml.append(l)
@@ -275,7 +380,7 @@ def main():
                 else:
                     print(f"Shape mismatch: {p} got {f.shape}, expected {sample_shape}")
                     
-    # Fill Test
+    # test
     valid_test_indices = []
     print("Processing Test Data...")
     for idx, (p, l) in enumerate(tqdm(zip(X_test_paths, y_test), total=num_test, desc="Test Feats")):
@@ -288,59 +393,20 @@ def main():
                     y_test_ml.append(l)
                     valid_test_indices.append(idx)
     
-    # If we had failures, we notice the memmap has empty rows, but our y_ml lists are shorter.
-    # We should slice the memmap to only include valid indices or just trust valid_indices
-    # Simpler: Create a new memmap or just slice in memory if not too fragmented?
-    # Actually, slicing a memmap with strict indices might force a copy.
-    # Training libraries usually handle contiguous arrays best.
-    # Given robustness, let's just use the valid count.
-    # HOWEVER, sklearn requires X and y to match.
-    # The simplest way to "shrink" the memmap without copying everything to RAM is to just keep the valid ones if they are contiguous...
-    # But they might not be if we skipped files.
-    # Given skipping is rare, let's assume validity or do a second pass if needed.
-    # Better: We can just use the valid_train_indices to slice X_train_ml.
-    # X_train_ml[valid_train_indices] will return a COPY in RAM if indices are not a slice.
-    
-    # If standard loading works most of the time, skipping is rare.
-    # Let's hope y_train_ml matches len(X_train_ml) if no errors.
-    
-    # Correction: If we skipped, X_train_ml has garbage at the skipped rows, and y_train_ml is shorter.
-    # We MUST align them.
-    
     if len(y_train_ml) < num_train:
          print(f"Warning: Dropped {num_train - len(y_train_ml)} training samples due to errors.")
-         # If we dropped samples, we have a problem: X_train_ml has gaps. 
-         # To avoid RAM copy, we might have to live with a copy if we slice.
-         # But the goal was to avoid RAM copy. 
-         # Optimization: Since we kept track of valid_train_indices, if `valid_train_indices` is basically `range(len(y_train_ml))`, we are good.
-         # If not, we are forced to copy.
          pass
          
     y_train_ml = np.array(y_train_ml)
     y_test_ml = np.array(y_test_ml)
     
-    # We need to slice the memmap to match Y length exactly if we just filled sequentially?
-    # No, we filled at `idx`. If `idx=5` failed, X[5] is garbage.
-    # We should have filled a separate counter `i` instead of `idx`.
+    pass
     
-    # RE-DOING logic slightly to be safe:
-    # Use a separate counter for insertion point.
-    pass # Placeholder for thought trace
-    
-    # Let's clean up and make it robust in one go in this edit:
-    # Resetting the memmap usage logic below to use a pointer `ptr`.
-    
-    # --- Corrected Implementation ---
-    
-    # Re-init memmaps with actual found counts? No, we don't know counts yet.
-    # Allocation for max is fine. We will slice at the end.
-    # Slicing a memmap: X[:actual_count] returns a view! This is perfect.
-    
-    # Train
+    # train
     train_ptr = 0
     y_train_clean = []
     
-    print("Processing Training Data (Memmap)...")
+    print("Processing Training Data")
     for p, l in tqdm(zip(X_train_paths, y_train), total=num_train, desc="Train Feats"):
         try:
             y, sr = load_and_process(p)
@@ -353,15 +419,14 @@ def main():
         except:
             continue
 
-    # Create a view of the valid data
-    X_train_final = X_train_ml[:train_ptr] # View
+    X_train_final = X_train_ml[:train_ptr] # view
     y_train_ml = np.array(y_train_clean)
     
-    # Test
+    # test
     test_ptr = 0
     y_test_clean = []
     
-    print("Processing Test Data (Memmap)...")
+    print("Processing Test Data")
     for p, l in tqdm(zip(X_test_paths, y_test), total=num_test, desc="Test Feats"):
         try:
             y, sr = load_and_process(p)
@@ -374,10 +439,9 @@ def main():
         except:
             continue
             
-    X_test_final = X_test_ml[:test_ptr] # View
+    X_test_final = X_test_ml[:test_ptr] # view
     y_test_ml = np.array(y_test_clean)
     
-    # Reassign for compatibility with existing variable names
     X_train_ml = X_train_final
     X_test_ml = X_test_final
 
@@ -398,7 +462,7 @@ def main():
     gbm.save(os.path.join(MODELS_DIR, "gbm.pkl"))
     results["GradientBoosting"] = {"best": gbm_acc, "preds": gbm_preds, "true": y_test_ml}
     
-    print("\nGenerating Comparison Plots...")
+    print("\nGenerating Comparison Plots")
     plt.figure(figsize=(12, 6))
     
     names = []

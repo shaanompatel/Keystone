@@ -5,14 +5,11 @@ import yt_dlp
 import shutil
 
 def download_audio(query, limit=5, output_dir="data/downloads", class_name=None):
-    """
-    Search and download audio from YouTube.
-    If class_name is provided, saves to output_dir/class_name/
-    """
+
     if class_name:
         target_dir = os.path.join(output_dir, class_name)
     else:
-        # Sanitize query for folder name
+        # get functional folder name
         target_dir = os.path.join(output_dir, query.replace(" ", "_").replace(":", "").replace("/", ""))
         
     if not os.path.exists(target_dir):
@@ -20,8 +17,8 @@ def download_audio(query, limit=5, output_dir="data/downloads", class_name=None)
         
     ydl_opts = {
         'format': 'bestaudio/best',
-        'noplaylist': False, # Enable playlists
-        'playlistend': limit, # Limit playlist items
+        'noplaylist': False,
+        'playlistend': limit,
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'wav',
@@ -42,9 +39,7 @@ def download_audio(query, limit=5, output_dir="data/downloads", class_name=None)
     return target_dir
 
 def slice_audio(directory, chunk_duration_ms=2000):
-    """
-    Slice all wav files in directory into smaller chunks.
-    """
+
     files = glob.glob(os.path.join(directory, "*.wav"))
     print(f"Slicing {len(files)} files in {directory}...")
     
@@ -56,14 +51,13 @@ def slice_audio(directory, chunk_duration_ms=2000):
             audio = AudioSegment.from_wav(f)
             base_name = os.path.basename(f).replace(".wav", "")
             
-            # Slice
+            # slice
             for i in range(0, len(audio), chunk_duration_ms):
                 chunk = audio[i:i+chunk_duration_ms]
                 if len(chunk) == chunk_duration_ms:
                     chunk_name = f"{base_name}_chunk_{i//1000}.wav"
                     chunk.export(os.path.join(directory, chunk_name), format="wav")
             
-            # Delete original
             try:
                 os.remove(f)
             except PermissionError:
@@ -82,4 +76,4 @@ if __name__ == "__main__":
     
     download_dir = download_audio(args.query, limit=args.limit, class_name=args.class_name)
     slice_audio(download_dir)
-    print(f"Done! Check {download_dir}")
+    print(f"Done, Check {download_dir}")

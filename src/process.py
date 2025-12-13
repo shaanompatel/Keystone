@@ -4,25 +4,20 @@ import os
 import glob
 from concurrent.futures import ThreadPoolExecutor
 
-# Feature extraction parameters
+# feature extraction params
 SAMPLE_RATE = 22050
 N_FFT = 2048
 HOP_LENGTH = 512
 N_MELS = 128
-# MFCC parameters
+
 N_MFCC = 13
-# Duration
-DURATION = 2.0  
+DURATION = 2.0
 EXPECTED_SAMPLES = int(SAMPLE_RATE * DURATION)
 
 def extract_features(audio, sr, feature_type='melspec'):
-    """
-    Extract features from audio based on feature_type.
-    feature_type: 'melspec', 'mfcc', 'chroma', 'spectral_contrast'
-    Returns: numpy array of shape (n_features, time_steps)
-    """
+
     try:
-        # Ensure consistent length
+        # check length
         if len(audio) < EXPECTED_SAMPLES:
             audio = np.pad(audio, (0, EXPECTED_SAMPLES - len(audio)))
         else:
@@ -49,9 +44,7 @@ def extract_features(audio, sr, feature_type='melspec'):
         return None
 
 def load_and_process(file_path):
-    """
-    Load audio file and return raw audio array.
-    """
+
     try:
         y, sr = librosa.load(file_path, sr=SAMPLE_RATE, duration=DURATION)
         return y, sr
@@ -61,16 +54,14 @@ def load_and_process(file_path):
         return None, None
 
 def audio_to_melspectrogram(file_path):
-    """
-    Helper to load audio and converting to melspectrogram directly.
-    """
+
     y, sr = load_and_process(file_path)
     if y is not None:
         return extract_features(y, sr, 'melspec')
     return None
 
 class AudioAugmenter:
-    """Class for raw audio augmentation."""
+
     @staticmethod
     def add_noise(data, noise_factor=0.005):
         noise = np.random.randn(len(data))
@@ -83,26 +74,20 @@ class AudioAugmenter:
     
     @staticmethod
     def time_stretch(data, rate=1.2):
-        # Note: Time stretch changes length, so we'd need to re-pad/crop.
-        # For simplicity in this pipeline, sticking to pitch shift and noise 
-        # which preserve length or are easier to handle before padding.
-        # But let's support it and handle length fix in dataset.
         return librosa.effects.time_stretch(data, rate=rate)
 
 def spec_augment(mel_spectrogram, time_masking_para=10, freq_masking_para=10):
-    """
-    Apply SpecAugment (Time and Frequency Masking) on Spectrograms.
-    """
+
     aug_spec = mel_spectrogram.copy()
     n_mels, n_steps = aug_spec.shape
     
-    # Frequency Masking
+    # mask frequency
     if freq_masking_para > 0:
         f = np.random.randint(0, freq_masking_para)
         f0 = np.random.randint(0, max(1, n_mels - f))
         aug_spec[f0:f0+f, :] = aug_spec.min()
     
-    # Time Masking
+    # mask time
     if time_masking_para > 0:
         t = np.random.randint(0, time_masking_para)
         t0 = np.random.randint(0, max(1, n_steps - t))
@@ -111,19 +96,9 @@ def spec_augment(mel_spectrogram, time_masking_para=10, freq_masking_para=10):
     return aug_spec
 
 def preprocess_dataset_lazy(data_dirs):
-    """
-    Scan directories and return list of file paths and labels.
-    data_dirs: List of root directories, e.g. ["data/real_train", "data/synthetic"]
-               Each root must have subdirs named by class (e.g. "A_Minor").
-    Does NOT load audio.
-    """
+
     if isinstance(data_dirs, str):
         data_dirs = [data_dirs]
-        
-    # First, scan one dir to get classes, or scan all and take union?
-    # Classes should be consistent across all dirs.
-    # Let's assume the first dir has all classes or we manually define them.
-    # Safe approach: Scan all dirs, collect all unique class names.
     
     all_classes = set()
     for d in data_dirs:
@@ -155,3 +130,37 @@ def preprocess_dataset_lazy(data_dirs):
                 labels.append(idx)
             
     return file_paths, labels, classes
+
+def compute_dataset_norm(feature_arrays, eps=1e-6):
+    """
+    feature_arrays: iterable of np arrays shaped (F, T) or (1, F, T)
+    Returns dict with mean/std as float32 scalars (global) for simplicity.
+    """
+    s1 = 0.0
+    s2 = 0.0
+    n = 0
+
+    for x in feature_arrays:
+        if x is None:
+            continue
+        x = np.asarray(x)
+        if x.ndim == 3:
+            x = x[0]
+        s1 += float(x.sum())
+        s2 += float((x * x).sum())
+        n += x.size
+
+    if n == 0:
+        return {"mean": 0.0, "std": 1.0}
+
+    mean = s1 / n
+    var = max(0.0, (s2 / n) - mean * mean)
+    std = float(np.sqrt(var) + eps)
+    return {"mean": float(mean), "std": float(std)}
+
+def apply_norm(x, norm_stats):
+    if norm_stats is None:
+        return x
+    mean = norm_stats.get("mean", 0.0)
+    std = norm_stats.get("std", 1.0)
+    return (x - mean) / std

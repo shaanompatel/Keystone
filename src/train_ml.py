@@ -1,4 +1,9 @@
 import os
+os.environ["MPLBACKEND"] = "Agg"
+
+import matplotlib
+matplotlib.use("Agg")
+
 import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, confusion_matrix
@@ -8,11 +13,10 @@ from tqdm import tqdm
 import tempfile
 import shutil
 
-# Import from our modules
 from process import preprocess_dataset_lazy, load_and_process, extract_features
 from models import BaselineModel, GradientBoostingWrapper
 
-# Config
+
 DATA_DIRS = ["data/real_train", "data/synthetic", "data/downloads"]
 MODELS_DIR = "models"
     
@@ -21,7 +25,6 @@ def main():
         os.makedirs(MODELS_DIR)
         
     print("Indexing dataset...")
-    # Note: We rely on preprocess_dataset_lazy to scan files
     file_paths, labels, classes = preprocess_dataset_lazy(DATA_DIRS)
     
     if len(file_paths) == 0:
@@ -35,10 +38,10 @@ def main():
     
     results = {}
 
-    print("\n--- Training ML Models ---")
-    print("Extracting features for ML models (using memmap for memory efficiency)...")
+    print("\nTraining ML Models")
+    print("Extracting features for ML models...")
     
-    # We need to determine the shape of features first
+    # get features shape
     sample_shape = None
     for p in X_train_paths:
         y_dummy, sr_dummy = load_and_process(p)
@@ -49,21 +52,18 @@ def main():
                  break
     
     if sample_shape is None:
-        print("Could not extract features from any training file!")
+        print("Could not extract features!")
         return
 
     print(f"Feature shape: {sample_shape}")
     
-    # Create memmaps
-    # Use a temp directory
     temp_dir = tempfile.mkdtemp()
     print(f"Using temp dir for memmaps: {temp_dir}")
     
     train_memmap_path = os.path.join(temp_dir, "X_train.dat")
     test_memmap_path = os.path.join(temp_dir, "X_test.dat")
     
-    # Pre-allocate memmaps
-    # Shape: (N_samples, *sample_shape)
+    # preallocate
     num_train = len(X_train_paths)
     num_test = len(X_test_paths)
     
@@ -73,11 +73,10 @@ def main():
     X_test_ml = np.memmap(test_memmap_path, dtype='float32', mode='w+', shape=(num_test,) + sample_shape)
     y_test_ml = []
 
-    # Fill Train
     train_ptr = 0
     y_train_clean = []
     
-    print("Processing Training Data (Memmap)...")
+    print("Processing Training Data")
     for p, l in tqdm(zip(X_train_paths, y_train), total=num_train, desc="Train Feats"):
         try:
             y, sr = load_and_process(p)
@@ -90,15 +89,13 @@ def main():
         except:
             continue
 
-    # Create a view of the valid data
-    X_train_final = X_train_ml[:train_ptr] # View
+    X_train_final = X_train_ml[:train_ptr]
     y_train_ml = np.array(y_train_clean)
     
-    # Test
     test_ptr = 0
     y_test_clean = []
     
-    print("Processing Test Data (Memmap)...")
+    print("Processing Test Data")
     for p, l in tqdm(zip(X_test_paths, y_test), total=num_test, desc="Test Feats"):
         try:
             y, sr = load_and_process(p)
@@ -111,15 +108,14 @@ def main():
         except:
             continue
             
-    X_test_final = X_test_ml[:test_ptr] # View
+    X_test_final = X_test_ml[:test_ptr]
     y_test_ml = np.array(y_test_clean)
     
-    # Reassign for compatibility with existing variable names
     X_train_ml = X_train_final
     X_test_ml = X_test_final
     
-    # --- Random Forest ---
-    print("\nTraining Random Forest...")
+    # random forest
+    print("\nTraining Random Forest")
     rf = BaselineModel()
     rf.fit(X_train_ml, y_train_ml)
     rf_preds = rf.predict(X_test_ml)
@@ -128,8 +124,8 @@ def main():
     rf.save(os.path.join(MODELS_DIR, "baseline_rf.pkl"))
     results["RandomForest"] = {"best": rf_acc, "preds": rf_preds, "true": y_test_ml}
     
-    # --- Gradient Boosting ---
-    print("\nTraining Gradient Boosting...")
+    # gradient boosting
+    print("\nTraining Gradient Boosting")
     gbm = GradientBoostingWrapper()
     gbm.fit(X_train_ml, y_train_ml)
     gbm_preds = gbm.predict(X_test_ml)
@@ -138,7 +134,7 @@ def main():
     gbm.save(os.path.join(MODELS_DIR, "gbm.pkl"))
     results["GradientBoosting"] = {"best": gbm_acc, "preds": gbm_preds, "true": y_test_ml}
     
-    print("\nGenerating Comparison Plots...")
+    print("\nGenerating Comparison Plots")
     plt.figure(figsize=(12, 6))
     
     names = []
@@ -156,7 +152,7 @@ def main():
         
     plt.figure(figsize=(10, 6))
     sns.barplot(x=names, y=scores)
-    plt.title("Model Accuracy Comparison (ML Only)")
+    plt.title("Model Accuracy Comparison")
     plt.ylim(0, 1.0)
     plt.savefig(os.path.join(MODELS_DIR, "model_comparison_ml.png"))
     plt.close()

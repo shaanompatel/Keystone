@@ -6,16 +6,14 @@ import numpy as np
 import argparse
 import time
 
-# Config
 DATA_DIR = "data/real_train"
 SAMPLE_RATE = 22050
-DURATION = 2.0  # Seconds per chunk
-# Hardcoded for current environment
+DURATION = 2.0  #seconds/chunk
+
+# harcoded
 FFMPEG_LOCATION = r"C:\Users\shaan\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin"
 
-# Search terms for each chord
-# We try to be specific to get clean samples
-# Comprehensive search queries for diverse dataset
+# search terms per chord for scraping
 SEARCH_QUERIES = {
     'C_Major': [
         'C Major guitar chord strum', 'C Major guitar chord clean', 
@@ -44,10 +42,7 @@ SEARCH_QUERIES = {
 }
 
 def download_audio(query, output_path, num_results=5):
-    """
-    Downloads audio from YouTube videos matching the query.
-    Returns list of downloaded filenames.
-    """
+
     ydl_opts = {
         'format': 'bestaudio/best',
         'postprocessors': [{
@@ -69,7 +64,7 @@ def download_audio(query, output_path, num_results=5):
     
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # We search for slightly more to ensure failures don't stop us
+            # search a lot to ensure data is retrieved
             search_query = f"ytsearch{num_results}:{query}"
             info = ydl.extract_info(search_query, download=True)
             
@@ -77,14 +72,11 @@ def download_audio(query, output_path, num_results=5):
                 for entry in info['entries']:
                     if entry:
                         fname = f"{output_path}/{entry['id']}.wav"
-                        # yt-dlp might leave it as .wav or .m4a depending on ffmpeg availability
-                        # But we asked for wav conversion.
-                        # Let's check what exists
+                        # get in wav format
                         base = f"{output_path}/{entry['id']}"
                         if os.path.exists(base + ".wav"):
                             downloaded_files.append(base + ".wav")
             else:
-                # Single video
                 fname = f"{output_path}/{info['id']}.wav"
                 if os.path.exists(fname):
                     downloaded_files.append(fname)
@@ -95,16 +87,12 @@ def download_audio(query, output_path, num_results=5):
     return downloaded_files
 
 def process_audio(file_path, chord_name, output_dir):
-    """
-    Loads audio, removes silence, and splits into 2-second chunks.
-    Saves chunks to output_dir.
-    """
+
     try:
-        # Load
+        # load
         y, sr = librosa.load(file_path, sr=SAMPLE_RATE)
         
-        # Remove silence (simple energy based)
-        # top_db=20 means any sound < max-20dB is considered silence
+        # remove any silence
         intervals = librosa.effects.split(y, top_db=20)
         
         chunk_idx = 0
@@ -113,11 +101,11 @@ def process_audio(file_path, chord_name, output_dir):
         for start, end in intervals:
             segment = y[start:end]
             
-            # Split segment into chunks
+            # split into chunks
             for i in range(0, len(segment) - samples_per_chunk, samples_per_chunk):
                 chunk = segment[i : i + samples_per_chunk]
                 
-                # Check energy to avoid empty chunks
+                # remove emty chunks
                 if np.mean(chunk**2) > 0.001:
                     filename = f"{chord_name}_{os.path.basename(file_path).split('.')[0]}_{chunk_idx}.wav"
                     sf.write(os.path.join(output_dir, filename), chunk, SAMPLE_RATE)
@@ -139,7 +127,6 @@ def main():
             
         print(f"\n--- Processing {chord} ---")
         
-        # Temp dir for downloads
         temp_dir = os.path.join("temp_downloads", chord)
         if not os.path.exists(temp_dir):
             os.makedirs(temp_dir)
@@ -147,7 +134,7 @@ def main():
         for query in queries:
             download_audio(query, temp_dir, num_results=5)
             
-        # Process all files in temp_dir
+        # process all temp
         raw_files = [os.path.join(temp_dir, f) for f in os.listdir(temp_dir) if f.endswith('.wav')]
         print(f"Found {len(raw_files)} raw files in {temp_dir}. Processing...")
         
