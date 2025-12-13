@@ -72,7 +72,7 @@ def load_model(model_name, num_classes):
     return model
 
 def main():
-    st.title("🎸 Sim2Real Chord Classifier")
+    st.title("Sim2Real Chord Classifier")
     st.markdown("Train on **Synthetic** waves, Test on **Real** audio.")
     
     classes = load_classes()
