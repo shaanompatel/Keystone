@@ -146,7 +146,7 @@ def train_dl_model(model_name, model, train_loader, test_loader, device, epochs=
         pct_start=0.1
     )
 
-    early_patience = 10
+    early_patience = 20
     best_epoch = -1
     best_acc = 0.0
 
@@ -222,6 +222,29 @@ def train_dl_model(model_name, model, train_loader, test_loader, device, epochs=
     print(f"Finished {model_name}. Best Val Acc: {best_acc:.4f}")
     return train_losses, val_accuracies, best_acc, all_preds, all_labels
 
+def evaluate_dl_model(model_name, model, loader, device):
+    model.eval()
+    correct, total = 0, 0
+    all_preds, all_labels = [], []
+
+    with torch.no_grad():
+        for inputs, labels in tqdm(loader, desc=f"{model_name} [Test]", unit="batch", leave=False):
+            inputs, labels = inputs.to(device), labels.to(device)
+            if model_name.startswith("CNN") and inputs.dim() == 3:
+                inputs = inputs.unsqueeze(1)
+
+            outputs = model(inputs)
+            _, predicted = torch.max(outputs, 1)
+
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+
+    acc = correct / max(1, total)
+    print(f"{model_name} Test Acc: {acc:.4f}")
+    return acc, all_preds, all_labels
+
 def main():
     if not os.path.exists(MODELS_DIR):
         os.makedirs(MODELS_DIR)
@@ -236,8 +259,14 @@ def main():
         for c in classes:
             f.write(c + "\n")
             
-    X_train_paths, X_test_paths, y_train, y_test = make_group_split(file_paths, labels, test_size=0.2, seed=42)
+    X_train_paths, X_temp_paths, y_train, y_temp = make_group_split(
+        file_paths, labels, test_size=0.20, seed=42
+    )
     
+    X_val_paths, X_test_paths, y_val, y_test = make_group_split(
+        X_temp_paths, y_temp, test_size=0.50, seed=43
+    )
+
     # get norm stats
     from process import compute_dataset_norm
 
@@ -296,29 +325,53 @@ def main():
         feature = exp["feature"]
         epochs = exp.get("epochs", EPOCHS)
         
-        train_ds = AudioDataset(X_train_paths, y_train, feature_type=feature, augment=augment, cache=True, norm_stats=norm_stats)
-        test_ds = AudioDataset(X_test_paths, y_test, feature_type=feature, augment=False, cache=True, norm_stats=norm_stats)
-        
+        train_ds = AudioDataset(
+            X_train_paths, y_train,
+            feature_type=feature, augment=augment, cache=True, norm_stats=norm_stats
+        )
+        val_ds = AudioDataset(
+            X_val_paths, y_val,
+            feature_type=feature, augment=False, cache=True, norm_stats=norm_stats
+        )
+        test_ds = AudioDataset(
+            X_test_paths, y_test,
+            feature_type=feature, augment=False, cache=True, norm_stats=norm_stats
+        )
+
         # sampling with balancing varying class sizes
         class_counts = np.bincount(np.array(y_train), minlength=len(classes))
         class_weights = 1.0 / np.maximum(class_counts, 1)
         sample_weights = [class_weights[y] for y in y_train]
         sampler = make_weighted_sampler(y_train, num_classes=len(classes))
-        train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler)
+        train_loader = DataLoader(
+            train_ds, batch_size=BATCH_SIZE, sampler=sampler,
+            num_workers = 4, pin_memory=True, persistent_workers=True
+        )
+
+        val_loader = DataLoader(
+            val_ds, batch_size=BATCH_SIZE, shuffle=False,
+            num_workers=4, pin_memory=True, persistent_workers=True
+        )
 
         test_loader = DataLoader(
-            test_ds,
-            batch_size=BATCH_SIZE,
-            shuffle=False,
-            num_workers=4,
-            pin_memory=True,
-            persistent_workers=True
+            test_ds, batch_size=BATCH_SIZE, shuffle=False,
+            num_workers=4, pin_memory=True, persistent_workers=True
         )
 
         model = exp["model_cls"](**exp["args"]).to(device)
         
-        losses, val_accs, best, preds, true_labels = train_dl_model(name, model, train_loader, test_loader, device, epochs=epochs)
-        results[name] = {"val_accs": val_accs, "best": best, "preds": preds, "true": true_labels}
+        losses, val_accs, best, _, _ = train_dl_model(name, model, train_loader, val_loader, device, epochs=epochs)
+        
+        model.load_state_dict(torch.load(os.path.join(MODELS_DIR, f"{name}_best.pth"), map_location=device))
+        test_acc, test_preds, test_true = evaluate_dl_model(name, model, test_loader, device)
+
+        results[name] = {
+            "best": test_acc,
+            "best_val": best,
+            "test_acc": test_acc,
+            "preds": test_preds,
+            "true": test_true,
+        }
         
         plt.figure()
         plt.plot(losses, label='Train Loss')
@@ -452,7 +505,7 @@ def main():
     rf_acc = np.mean(rf_preds == y_test_ml)
     print(f"Random Forest Acc: {rf_acc:.4f}")
     rf.save(os.path.join(MODELS_DIR, "baseline_rf.pkl"))
-    results["RandomForest"] = {"best": rf_acc, "preds": rf_preds, "true": y_test_ml}
+    results["RandomForest"] = {"best": rf_acc, "test_acc": rf_acc, "preds": rf_preds, "true": y_test_ml}
     
     gbm = GradientBoostingWrapper()
     gbm.fit(X_train_ml, y_train_ml)
@@ -460,7 +513,7 @@ def main():
     gbm_acc = np.mean(gbm_preds == y_test_ml)
     print(f"Gradient Boosting Acc: {gbm_acc:.4f}")
     gbm.save(os.path.join(MODELS_DIR, "gbm.pkl"))
-    results["GradientBoosting"] = {"best": gbm_acc, "preds": gbm_preds, "true": y_test_ml}
+    results["GradientBoosting"] = {"best": gbm_acc, "test_acc": gbm_acc, "preds": gbm_preds, "true": y_test_ml}
     
     print("\nGenerating Comparison Plots")
     plt.figure(figsize=(12, 6))
@@ -485,8 +538,8 @@ def main():
     plt.savefig(os.path.join(MODELS_DIR, "model_comparison_bar.png"))
     plt.close()
     
-    best_model_name = max(results, key=lambda x: results[x]["best"])
-    print(f"Winner: {best_model_name}")
+    best_model_name = max(results, key=lambda x: results[x]["test_acc"])
+    print(f"Winner: {best_model_name} (Test Acc={results[best_model_name]['test_acc']:.4f})")
     
     if best_model_name in ["CNN_Basic", "CNN_Augmented", "RNN_Mel"]:
         import shutil
