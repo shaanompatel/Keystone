@@ -16,7 +16,7 @@ DATA_DIR = "data/real_train"
 MODELS_DIR = "models"
 CLASSES_FILE = os.path.join(MODELS_DIR, "classes.txt")
 
-st.set_page_config(page_title="Sim2Real Chord Analyzer", layout="wide")
+# st.set_page_config(page_title="Sim2Real Chord Analyzer", layout="wide")
 
 @st.cache_resource
 def load_classes():
@@ -72,7 +72,7 @@ def load_model(model_name, num_classes):
     return model
 
 def main():
-    st.title("Sim2Real Chord Classifier")
+    st.title("Keystone")
     st.markdown("Train on **Synthetic** waves, Test on **Real** audio.")
     
     classes = load_classes()
