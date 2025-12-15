@@ -17,7 +17,7 @@ Generate synthetic training data and (optionally) download real samples:
 # Generate synthetic waveforms
 python src/generator.py
 
-# (Optional) Download real examples from YouTube
+# Download real examples from YouTube
 python src/youtube_scraper.py --query "C Major Guitar Strum" --class_name "C_Major"
 ```
 
